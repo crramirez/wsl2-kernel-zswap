@@ -162,8 +162,35 @@ if [[ "${KERNEL_MAJOR_VERSION}" -ge 6 ]]; then
     exit 1
   fi
 
+  if [[ "${VHDX_SCRIPT}" == "./Microsoft/scripts/gen_artifacts_vhdx.sh" ]]; then
+    if ! make headers_install INSTALL_HDR_PATH="${BUILD_DIR}/headers"; then
+      echo "Error: Failed to install kernel headers"
+      exit 1
+    fi
+
+    if ! make -C tools/perf install \
+        prefix="${BUILD_DIR}/perf" bindir="${BUILD_DIR}/perf/bin"; then
+      echo "Error: Failed to build and install perf"
+      exit 1
+    fi
+
+    VHDX_ARGS=(
+      "${BUILD_DIR}/modules"
+      "${BUILD_DIR}/headers"
+      "${BUILD_DIR}/perf"
+      "${KERNEL_RELEASE}"
+      "${BUILD_DIR}/modules.vhdx"
+    )
+  else
+    VHDX_ARGS=(
+      "${BUILD_DIR}/modules"
+      "${KERNEL_RELEASE}"
+      "${BUILD_DIR}/modules.vhdx"
+    )
+  fi
+
   echo "Creating modules VHDX using ${VHDX_SCRIPT}..."
-  if ! sudo "${VHDX_SCRIPT}" "${BUILD_DIR}/modules" "${KERNEL_RELEASE}" "${BUILD_DIR}/modules.vhdx"; then
+  if ! sudo "${VHDX_SCRIPT}" "${VHDX_ARGS[@]}"; then
     echo "Error: Failed to create modules VHDX"
     exit 1
   fi
