@@ -168,8 +168,8 @@ if [[ "${KERNEL_MAJOR_VERSION}" -ge 6 ]]; then
       exit 1
     fi
 
-    if ! make -C tools/perf install \
-        prefix="${BUILD_DIR}/perf" bindir="${BUILD_DIR}/perf/bin"; then
+    if ! make -C tools/perf NO_JEVENTS=1 NO_JVMTI=1 NO_LIBTRACEEVENT=1 \
+        install DESTDIR="${BUILD_DIR}/perf" prefix=/; then
       echo "Error: Failed to build and install perf"
       exit 1
     fi
