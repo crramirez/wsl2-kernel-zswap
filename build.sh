@@ -88,6 +88,9 @@ enable_if_supported ZBUD
 
 # Keep an existing VGEM module or built-in driver; enable it only if disabled.
 if ! grep -Eq '^CONFIG_DRM_VGEM=[ym]$' .config; then
+  if ! grep -Eq '^CONFIG_DRM=[ym]$' .config; then
+    enable_if_supported DRM
+  fi
   enable_if_supported DRM_VGEM
 fi
 
