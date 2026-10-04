@@ -6,7 +6,7 @@ set -e
 set -o pipefail
 
 sudo apt update
-sudo apt install build-essential flex bison libssl-dev libelf-dev libncurses-dev autoconf libudev-dev libtool dwarves cpio qemu-utils
+sudo apt install build-essential flex bison libssl-dev libelf-dev libncurses-dev autoconf libudev-dev libtool dwarves cpio qemu-utils pkg-config python3 python-is-python3 python3-dev
 
 WSL2_KERNEL_VERSION="$(uname -r | grep -o '^[0-9\.]\+')"
 KERNEL_MAJOR_VERSION="$(echo "${WSL2_KERNEL_VERSION}" | cut -d. -f1)"
@@ -27,36 +27,98 @@ cd "WSL2-Linux-Kernel-linux-msft-wsl-${WSL2_KERNEL_VERSION}"
 
 cp Microsoft/config-wsl .config           # Use WSL default kernel config as the base
 
-# Add zswap configuration
-# Common configuration for all kernel versions
-cat << EOF >> .config
+# Kconfig symbols have changed independently of the kernel major version. For
+# example, older kernels require FRONTSWAP/ZPOOL/ZBUD, while newer kernels
+# select their allocator directly. Only request options declared by this tree.
+kconfig_symbol_supported() {
+  local symbol="$1"
 
-CONFIG_CRYPTO_ZSTD=y
-CONFIG_ZSTD_COMMON=y
-CONFIG_ZSTD_COMPRESS=y
+  grep -Rqs --include='Kconfig*' \
+    -E "^[[:space:]]*(menu)?config[[:space:]]+${symbol}([[:space:]]|$)" .
+}
 
-EOF
+enable_if_supported() {
+  local symbol="$1"
 
-# Add CONFIG_FRONTSWAP for kernel 5.x only (removed in 6.x)
-if [[ "${KERNEL_MAJOR_VERSION}" -lt 6 ]]; then
-  cat << EOF >> .config
-CONFIG_FRONTSWAP=y
-EOF
+  if kconfig_symbol_supported "${symbol}"; then
+    ./scripts/config --enable "${symbol}"
+    echo "Enabled CONFIG_${symbol}"
+  else
+    echo "Skipping unsupported CONFIG_${symbol}"
+  fi
+}
+
+select_choice_if_supported() {
+  local choice_prefix="$1"
+  local selected_symbol="$2"
+  local symbol
+
+  if ! kconfig_symbol_supported "${selected_symbol}"; then
+    echo "Skipping unsupported CONFIG_${selected_symbol}; keeping the kernel default"
+    return
+  fi
+
+  # Disable every supported alternative first so olddefconfig cannot retain a
+  # competing selection from Microsoft/config-wsl.
+  while read -r symbol; do
+    [[ -n "${symbol}" ]] || continue
+    ./scripts/config --disable "${symbol}"
+  done < <(
+    grep -Rh --include='Kconfig*' \
+      -E "^[[:space:]]*config[[:space:]]+${choice_prefix}[A-Z0-9_]+([[:space:]]|$)" . |
+      sed -E 's/^[[:space:]]*config[[:space:]]+([A-Z0-9_]+).*/\1/' |
+      sort -u
+  )
+
+  ./scripts/config --enable "${selected_symbol}"
+  echo "Selected CONFIG_${selected_symbol}"
+}
+
+enable_if_supported CRYPTO_ZSTD
+enable_if_supported ZSTD_COMMON
+enable_if_supported ZSTD_COMPRESS
+enable_if_supported FRONTSWAP
+enable_if_supported ZSWAP
+select_choice_if_supported ZSWAP_COMPRESSOR_DEFAULT_ ZSWAP_COMPRESSOR_DEFAULT_ZSTD
+select_choice_if_supported ZSWAP_ZPOOL_DEFAULT_ ZSWAP_ZPOOL_DEFAULT_ZBUD
+enable_if_supported ZSWAP_DEFAULT_ON
+enable_if_supported ZSWAP_SHRINKER_DEFAULT_ON
+enable_if_supported ZPOOL
+enable_if_supported ZBUD
+
+# Keep an existing VGEM module or built-in driver; enable it only if disabled.
+if ! grep -Eq '^CONFIG_DRM_VGEM=[ym]$' .config; then
+  if ! grep -Eq '^CONFIG_DRM=[ym]$' .config; then
+    enable_if_supported DRM
+  fi
+  enable_if_supported DRM_VGEM
 fi
 
-# Add remaining zswap configuration (common to all versions)
-cat << EOF >> .config
-CONFIG_ZSWAP=y
-CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y
-CONFIG_ZSWAP_COMPRESSOR_DEFAULT="zstd"
-CONFIG_ZSWAP_ZPOOL_DEFAULT_ZBUD=y
-CONFIG_ZSWAP_ZPOOL_DEFAULT="zbud"
-CONFIG_ZSWAP_DEFAULT_ON=y
-CONFIG_ZPOOL=y
-CONFIG_ZBUD=y
-EOF
-
 make olddefconfig
+
+# Fail early if Kconfig could not satisfy the essential zswap settings. The
+# shrinker is checked only when this kernel exposes the option.
+if ! grep -qx 'CONFIG_ZSWAP=y' .config; then
+  echo "Error: CONFIG_ZSWAP could not be enabled for this kernel configuration"
+  exit 1
+fi
+
+if ! grep -qx 'CONFIG_ZSWAP_DEFAULT_ON=y' .config; then
+  echo "Error: CONFIG_ZSWAP_DEFAULT_ON could not be enabled"
+  exit 1
+fi
+
+if kconfig_symbol_supported ZSWAP_SHRINKER_DEFAULT_ON && \
+    ! grep -qx 'CONFIG_ZSWAP_SHRINKER_DEFAULT_ON=y' .config; then
+  echo "Error: CONFIG_ZSWAP_SHRINKER_DEFAULT_ON is supported but could not be enabled"
+  exit 1
+fi
+
+if kconfig_symbol_supported DRM_VGEM && \
+    ! grep -Eq '^CONFIG_DRM_VGEM=[ym]$' .config; then
+  echo "Error: CONFIG_DRM_VGEM could not be enabled; check its DRM dependencies"
+  exit 1
+fi
 
 make -j $(nproc)
 
@@ -90,9 +152,45 @@ if [[ "${KERNEL_MAJOR_VERSION}" -ge 6 ]]; then
     exit 1
   fi
 
-  # Use Microsoft's gen_modules_vhdx.sh script
-  echo "Creating modules VHDX using Microsoft's gen_modules_vhdx.sh script..."
-  if ! sudo ./Microsoft/scripts/gen_modules_vhdx.sh "${BUILD_DIR}/modules" "${KERNEL_RELEASE}" "${BUILD_DIR}/modules.vhdx"; then
+  # The generator was renamed; support both names across kernel releases.
+  VHDX_SCRIPT="./Microsoft/scripts/gen_artifacts_vhdx.sh"
+  if [[ ! -f "${VHDX_SCRIPT}" ]]; then
+    VHDX_SCRIPT="./Microsoft/scripts/gen_modules_vhdx.sh"
+  fi
+  if [[ ! -f "${VHDX_SCRIPT}" ]]; then
+    echo "Error: Could not find Microsoft's VHDX generator script"
+    exit 1
+  fi
+
+  if [[ "${VHDX_SCRIPT}" == "./Microsoft/scripts/gen_artifacts_vhdx.sh" ]]; then
+    if ! make headers_install INSTALL_HDR_PATH="${BUILD_DIR}/headers"; then
+      echo "Error: Failed to install kernel headers"
+      exit 1
+    fi
+
+    if ! make -C tools/perf NO_JEVENTS=1 NO_JVMTI=1 NO_LIBTRACEEVENT=1 \
+        install DESTDIR="${BUILD_DIR}/perf" prefix=/; then
+      echo "Error: Failed to build and install perf"
+      exit 1
+    fi
+
+    VHDX_ARGS=(
+      "${BUILD_DIR}/modules"
+      "${BUILD_DIR}/headers"
+      "${BUILD_DIR}/perf"
+      "${KERNEL_RELEASE}"
+      "${BUILD_DIR}/modules.vhdx"
+    )
+  else
+    VHDX_ARGS=(
+      "${BUILD_DIR}/modules"
+      "${KERNEL_RELEASE}"
+      "${BUILD_DIR}/modules.vhdx"
+    )
+  fi
+
+  echo "Creating modules VHDX using ${VHDX_SCRIPT}..."
+  if ! sudo "${VHDX_SCRIPT}" "${VHDX_ARGS[@]}"; then
     echo "Error: Failed to create modules VHDX"
     exit 1
   fi
