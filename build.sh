@@ -27,36 +27,84 @@ cd "WSL2-Linux-Kernel-linux-msft-wsl-${WSL2_KERNEL_VERSION}"
 
 cp Microsoft/config-wsl .config           # Use WSL default kernel config as the base
 
-# Add zswap configuration
-# Common configuration for all kernel versions
-cat << EOF >> .config
+# Kconfig symbols have changed independently of the kernel major version. For
+# example, older kernels require FRONTSWAP/ZPOOL/ZBUD, while newer kernels
+# select their allocator directly. Only request options declared by this tree.
+kconfig_symbol_supported() {
+  local symbol="$1"
 
-CONFIG_CRYPTO_ZSTD=y
-CONFIG_ZSTD_COMMON=y
-CONFIG_ZSTD_COMPRESS=y
+  grep -Rqs --include='Kconfig*' \
+    -E "^[[:space:]]*(menu)?config[[:space:]]+${symbol}([[:space:]]|$)" .
+}
 
-EOF
+enable_if_supported() {
+  local symbol="$1"
 
-# Add CONFIG_FRONTSWAP for kernel 5.x only (removed in 6.x)
-if [[ "${KERNEL_MAJOR_VERSION}" -lt 6 ]]; then
-  cat << EOF >> .config
-CONFIG_FRONTSWAP=y
-EOF
-fi
+  if kconfig_symbol_supported "${symbol}"; then
+    ./scripts/config --enable "${symbol}"
+    echo "Enabled CONFIG_${symbol}"
+  else
+    echo "Skipping unsupported CONFIG_${symbol}"
+  fi
+}
 
-# Add remaining zswap configuration (common to all versions)
-cat << EOF >> .config
-CONFIG_ZSWAP=y
-CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y
-CONFIG_ZSWAP_COMPRESSOR_DEFAULT="zstd"
-CONFIG_ZSWAP_ZPOOL_DEFAULT_ZBUD=y
-CONFIG_ZSWAP_ZPOOL_DEFAULT="zbud"
-CONFIG_ZSWAP_DEFAULT_ON=y
-CONFIG_ZPOOL=y
-CONFIG_ZBUD=y
-EOF
+select_choice_if_supported() {
+  local choice_prefix="$1"
+  local selected_symbol="$2"
+  local symbol
+
+  if ! kconfig_symbol_supported "${selected_symbol}"; then
+    echo "Skipping unsupported CONFIG_${selected_symbol}; keeping the kernel default"
+    return
+  fi
+
+  # Disable every supported alternative first so olddefconfig cannot retain a
+  # competing selection from Microsoft/config-wsl.
+  while read -r symbol; do
+    [[ -n "${symbol}" ]] || continue
+    ./scripts/config --disable "${symbol}"
+  done < <(
+    grep -Rh --include='Kconfig*' \
+      -E "^[[:space:]]*config[[:space:]]+${choice_prefix}[A-Z0-9_]+([[:space:]]|$)" . |
+      sed -E 's/^[[:space:]]*config[[:space:]]+([A-Z0-9_]+).*/\1/' |
+      sort -u
+  )
+
+  ./scripts/config --enable "${selected_symbol}"
+  echo "Selected CONFIG_${selected_symbol}"
+}
+
+enable_if_supported CRYPTO_ZSTD
+enable_if_supported ZSTD_COMMON
+enable_if_supported ZSTD_COMPRESS
+enable_if_supported FRONTSWAP
+enable_if_supported ZSWAP
+select_choice_if_supported ZSWAP_COMPRESSOR_DEFAULT_ ZSWAP_COMPRESSOR_DEFAULT_ZSTD
+select_choice_if_supported ZSWAP_ZPOOL_DEFAULT_ ZSWAP_ZPOOL_DEFAULT_ZBUD
+enable_if_supported ZSWAP_DEFAULT_ON
+enable_if_supported ZSWAP_SHRINKER_DEFAULT_ON
+enable_if_supported ZPOOL
+enable_if_supported ZBUD
 
 make olddefconfig
+
+# Fail early if Kconfig could not satisfy the essential zswap settings. The
+# shrinker is checked only when this kernel exposes the option.
+if ! grep -qx 'CONFIG_ZSWAP=y' .config; then
+  echo "Error: CONFIG_ZSWAP could not be enabled for this kernel configuration"
+  exit 1
+fi
+
+if ! grep -qx 'CONFIG_ZSWAP_DEFAULT_ON=y' .config; then
+  echo "Error: CONFIG_ZSWAP_DEFAULT_ON could not be enabled"
+  exit 1
+fi
+
+if kconfig_symbol_supported ZSWAP_SHRINKER_DEFAULT_ON && \
+    ! grep -qx 'CONFIG_ZSWAP_SHRINKER_DEFAULT_ON=y' .config; then
+  echo "Error: CONFIG_ZSWAP_SHRINKER_DEFAULT_ON is supported but could not be enabled"
+  exit 1
+fi
 
 make -j $(nproc)
 
