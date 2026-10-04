@@ -152,9 +152,18 @@ if [[ "${KERNEL_MAJOR_VERSION}" -ge 6 ]]; then
     exit 1
   fi
 
-  # Use Microsoft's gen_modules_vhdx.sh script
-  echo "Creating modules VHDX using Microsoft's gen_modules_vhdx.sh script..."
-  if ! sudo ./Microsoft/scripts/gen_modules_vhdx.sh "${BUILD_DIR}/modules" "${KERNEL_RELEASE}" "${BUILD_DIR}/modules.vhdx"; then
+  # The generator was renamed; support both names across kernel releases.
+  VHDX_SCRIPT="./Microsoft/scripts/gen_artifacts_vhdx.sh"
+  if [[ ! -f "${VHDX_SCRIPT}" ]]; then
+    VHDX_SCRIPT="./Microsoft/scripts/gen_modules_vhdx.sh"
+  fi
+  if [[ ! -f "${VHDX_SCRIPT}" ]]; then
+    echo "Error: Could not find Microsoft's VHDX generator script"
+    exit 1
+  fi
+
+  echo "Creating modules VHDX using ${VHDX_SCRIPT}..."
+  if ! sudo "${VHDX_SCRIPT}" "${BUILD_DIR}/modules" "${KERNEL_RELEASE}" "${BUILD_DIR}/modules.vhdx"; then
     echo "Error: Failed to create modules VHDX"
     exit 1
   fi
