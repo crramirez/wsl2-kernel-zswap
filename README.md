@@ -33,6 +33,12 @@ removed options in newer kernels. It also enables
 generate a `modules.vhdx` file containing kernel modules, using the kernel
 tree's generator when available and a built-in fallback otherwise.
 
+The script prefers LZ4 as the default zswap compressor and enables its crypto
+driver and required libraries as built-in kernel support, even if the base
+configuration did not enable them. If LZ4 is unavailable or Kconfig cannot enable
+it, the script tries zstd instead. The build stops if neither compressor can be
+configured.
+
 # Installation
 
 ## Kernel 5.x
@@ -69,5 +75,5 @@ cat /sys/module/zswap/parameters/enabled
 # Should output: Y
 
 cat /sys/module/zswap/parameters/compressor
-# Should output: zstd
+# Should output: lz4 (or zstd if LZ4 could not be enabled)
 ```
