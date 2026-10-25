@@ -74,6 +74,34 @@ select_choice_if_supported() {
   echo "Selected CONFIG_${selected_symbol}"
 }
 
+configure_zswap_compressor() {
+  local compressor
+
+  for compressor in LZ4 ZSTD; do
+    if ! kconfig_symbol_supported "ZSWAP_COMPRESSOR_DEFAULT_${compressor}"; then
+      echo "Skipping unsupported zswap compressor ${compressor}"
+      continue
+    fi
+
+    # The crypto driver selects its required compression/decompression libraries.
+    enable_if_supported "CRYPTO_${compressor}"
+    select_choice_if_supported ZSWAP_COMPRESSOR_DEFAULT_ "ZSWAP_COMPRESSOR_DEFAULT_${compressor}"
+    make olddefconfig
+
+    if grep -qx "CONFIG_CRYPTO_${compressor}=y" .config && \
+        grep -qx "CONFIG_ZSWAP_COMPRESSOR_DEFAULT_${compressor}=y" .config && \
+        grep -qx "CONFIG_ZSWAP_COMPRESSOR_DEFAULT=\"${compressor,,}\"" .config; then
+      echo "Using ${compressor,,} as the default zswap compressor"
+      return
+    fi
+
+    echo "Warning: Could not configure ${compressor} as the built-in zswap compressor" >&2
+  done
+
+  echo "Error: Neither LZ4 nor zstd could be configured as the default zswap compressor" >&2
+  return 1
+}
+
 generate_modules_vhdx() (
   local modules_dir="$1"
   local kernel_release="$2"
@@ -109,19 +137,15 @@ generate_modules_vhdx() (
   fi
 )
 
-enable_if_supported CRYPTO_ZSTD
-enable_if_supported ZSTD_COMMON
-enable_if_supported ZSTD_COMPRESS
 enable_if_supported FRONTSWAP
 enable_if_supported ZSWAP
-select_choice_if_supported ZSWAP_COMPRESSOR_DEFAULT_ ZSWAP_COMPRESSOR_DEFAULT_ZSTD
 select_choice_if_supported ZSWAP_ZPOOL_DEFAULT_ ZSWAP_ZPOOL_DEFAULT_ZBUD
 enable_if_supported ZSWAP_DEFAULT_ON
 enable_if_supported ZSWAP_SHRINKER_DEFAULT_ON
 enable_if_supported ZPOOL
 enable_if_supported ZBUD
 
-make olddefconfig
+configure_zswap_compressor
 
 # Fail early if Kconfig could not satisfy the essential zswap settings. The
 # shrinker is checked only when this kernel exposes the option.
